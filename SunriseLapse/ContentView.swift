@@ -2,95 +2,115 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var controller = CaptureController()
+    @StateObject private var level = LevelMonitor()
     @State private var focusBoxPoint: CGPoint?
-    @State private var focusBoxVisible = false
-    @State private var focusBoxScale: CGFloat = 1.3
+    @State private var focusBoxScale: CGFloat = 1.0
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
+        GeometryReader { geometry in
+            ZStack {
+                Color.black.ignoresSafeArea()
 
-            CameraPreview(session: controller.session) { layerPoint, devicePoint in
-                controller.focus(at: devicePoint)
-                showFocusBox(at: layerPoint)
-            }
-            .ignoresSafeArea()
+                CameraPreview(session: controller.session) { layerPoint, devicePoint in
+                    controller.focus(at: devicePoint)
+                    showFocusBox(at: layerPoint)
+                }
+                .ignoresSafeArea()
 
-            // 对焦框（仿原生：点按处出现黄色方框，收缩到位后淡出）
-            if let point = focusBoxPoint, focusBoxVisible {
-                Rectangle()
-                    .stroke(Color.yellow, lineWidth: 1.5)
-                    .frame(width: 80, height: 80)
-                    .scaleEffect(focusBoxScale)
-                    .position(point)
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
-            }
+                // 水平仪：白色基准线 + 实时水平线（与真实地平面平行，水平时变黄重合）
+                ZStack {
+                    Rectangle()
+                        .fill(Color.white.opacity(0.5))
+                        .frame(width: 160, height: 1)
+                    Rectangle()
+                        .fill(level.isLevel ? Color.yellow : Color.white)
+                        .frame(width: 160, height: 1.5)
+                        .rotationEffect(.radians(-level.tilt))
+                }
+                .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
+                .allowsHitTesting(false)
 
-            VStack {
-                if controller.state == .recording {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(Color.red)
-                            .frame(width: 8, height: 8)
-                        Text(formattedElapsed)
-                            .font(.system(.body, design: .monospaced))
-                            .foregroundColor(.white)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(.black.opacity(0.5))
-                    .clipShape(Capsule())
-                    .padding(.top, 8)
+                // 对焦框（仿原生拍照模式：点按后出现并一直停留在该点）
+                if let point = focusBoxPoint {
+                    Rectangle()
+                        .stroke(Color.yellow, lineWidth: 1.5)
+                        .frame(width: 80, height: 80)
+                        .scaleEffect(focusBoxScale)
+                        .position(point)
+                        .allowsHitTesting(false)
                 }
 
-                if controller.state == .composing {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .tint(.white)
-                        Text("正在合成…")
-                            .foregroundColor(.white)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(.black.opacity(0.5))
-                    .clipShape(Capsule())
-                    .padding(.top, 8)
-                }
-
-                Spacer()
-
-                // 变焦档位切换（仿原生 .5 / 1 / 2 / 3；仅录制前可切）
-                if controller.lenses.count > 1 {
-                    HStack(spacing: 12) {
-                        ForEach(Array(controller.lenses.enumerated()), id: \.element.id) { index, lens in
-                            Button {
-                                controller.switchLens(to: index)
-                            } label: {
-                                Text(lens.label)
-                                    .font(.system(.caption, design: .rounded).bold())
-                                    .foregroundColor(index == controller.currentLensIndex ? .yellow : .white)
-                                    .frame(width: 36, height: 36)
-                                    .background(.black.opacity(index == controller.currentLensIndex ? 0.7 : 0.4))
-                                    .clipShape(Circle())
-                                    .overlay(
-                                        Circle().stroke(
-                                            index == controller.currentLensIndex ? Color.yellow : Color.clear,
-                                            lineWidth: 1.5)
-                                    )
-                            }
-                            .disabled(controller.state != .idle)
+                VStack {
+                    if controller.state == .recording {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(Color.red)
+                                .frame(width: 8, height: 8)
+                            Text(formattedElapsed)
+                                .font(.system(.body, design: .monospaced))
+                                .foregroundColor(.white)
                         }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(.black.opacity(0.5))
+                        .clipShape(Capsule())
+                        .padding(.top, 8)
                     }
-                    .padding(.bottom, 16)
-                }
 
-                recordButton
-                    .padding(.bottom, 32)
+                    if controller.state == .composing {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .tint(.white)
+                            Text("正在合成…")
+                                .foregroundColor(.white)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(.black.opacity(0.5))
+                        .clipShape(Capsule())
+                        .padding(.top, 8)
+                    }
+
+                    Spacer()
+
+                    // 变焦档位切换（仿原生 .5 / 1 / 2 / 3；仅录制前可切）
+                    if controller.lenses.count > 1 {
+                        HStack(spacing: 12) {
+                            ForEach(Array(controller.lenses.enumerated()), id: \.element.id) { index, lens in
+                                Button {
+                                    controller.switchLens(to: index)
+                                } label: {
+                                    Text(lens.label)
+                                        .font(.system(.caption, design: .rounded).bold())
+                                        .foregroundColor(index == controller.currentLensIndex ? .yellow : .white)
+                                        .frame(width: 36, height: 36)
+                                        .background(.black.opacity(index == controller.currentLensIndex ? 0.7 : 0.4))
+                                        .clipShape(Circle())
+                                        .overlay(
+                                            Circle().stroke(
+                                                index == controller.currentLensIndex ? Color.yellow : Color.clear,
+                                                lineWidth: 1.5)
+                                        )
+                                }
+                                .disabled(controller.state != .idle)
+                            }
+                        }
+                        .padding(.bottom, 16)
+                    }
+
+                    recordButton
+                        .padding(.bottom, 32)
+                }
             }
-        }
-        .onAppear {
-            controller.requestAccessAndStart()
+            .onAppear {
+                controller.requestAccessAndStart()
+                level.start()
+                // 初始对焦框显示在画面中心（与默认对焦兴趣点一致）
+                focusBoxPoint = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
+            }
+            .onDisappear {
+                level.stop()
+            }
         }
         .alert("提示", isPresented: messagePresented) {
             Button("好") { controller.message = nil }
@@ -99,19 +119,12 @@ struct ContentView: View {
         }
     }
 
-    /// 点按处显示对焦框：先放大出现、收缩到位，1.5 秒后淡出
+    /// 点按处显示对焦框：先放大出现、收缩到位，之后一直停留（直到点下一处）
     private func showFocusBox(at point: CGPoint) {
         focusBoxPoint = point
         focusBoxScale = 1.3
         withAnimation(.easeOut(duration: 0.2)) {
-            focusBoxVisible = true
             focusBoxScale = 1.0
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            guard focusBoxPoint == point else { return }
-            withAnimation(.easeOut(duration: 0.3)) {
-                focusBoxVisible = false
-            }
         }
     }
 
