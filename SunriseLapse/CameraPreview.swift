@@ -1,10 +1,11 @@
 import SwiftUI
 import AVFoundation
 
-/// 全屏相机预览，支持点按对焦（坐标经 previewLayer 转换后回调）
+/// 全屏相机预览，支持点按对焦。
+/// 回调同时给出屏幕坐标（用于画对焦框）和设备坐标（用于设置对焦兴趣点）。
 struct CameraPreview: UIViewRepresentable {
     let session: AVCaptureSession
-    var onTap: ((CGPoint) -> Void)?
+    var onTap: ((_ layerPoint: CGPoint, _ devicePoint: CGPoint) -> Void)?
 
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView()
@@ -24,9 +25,9 @@ struct CameraPreview: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject {
-        var onTap: ((CGPoint) -> Void)?
+        var onTap: ((CGPoint, CGPoint) -> Void)?
 
-        init(onTap: ((CGPoint) -> Void)?) {
+        init(onTap: ((CGPoint, CGPoint) -> Void)?) {
             self.onTap = onTap
         }
 
@@ -34,7 +35,7 @@ struct CameraPreview: UIViewRepresentable {
             guard let view = gesture.view as? PreviewView else { return }
             let layerPoint = gesture.location(in: view)
             let devicePoint = view.videoPreviewLayer.captureDevicePointConverted(fromLayerPoint: layerPoint)
-            onTap?(devicePoint)
+            onTap?(layerPoint, devicePoint)
         }
     }
 

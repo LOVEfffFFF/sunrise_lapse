@@ -2,15 +2,30 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var controller = CaptureController()
+    @State private var focusBoxPoint: CGPoint?
+    @State private var focusBoxVisible = false
+    @State private var focusBoxScale: CGFloat = 1.3
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            CameraPreview(session: controller.session) { devicePoint in
+            CameraPreview(session: controller.session) { layerPoint, devicePoint in
                 controller.focus(at: devicePoint)
+                showFocusBox(at: layerPoint)
             }
             .ignoresSafeArea()
+
+            // 对焦框（仿原生：点按处出现黄色方框，收缩到位后淡出）
+            if let point = focusBoxPoint, focusBoxVisible {
+                Rectangle()
+                    .stroke(Color.yellow, lineWidth: 1.5)
+                    .frame(width: 80, height: 80)
+                    .scaleEffect(focusBoxScale)
+                    .position(point)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
 
             VStack {
                 if controller.state == .recording {
@@ -45,7 +60,7 @@ struct ContentView: View {
 
                 Spacer()
 
-                // 镜头切换（仿原生 .5 / 1 / 3；仅录制前可切）
+                // 变焦档位切换（仿原生 .5 / 1 / 2 / 3；仅录制前可切）
                 if controller.lenses.count > 1 {
                     HStack(spacing: 12) {
                         ForEach(Array(controller.lenses.enumerated()), id: \.element.id) { index, lens in
@@ -81,6 +96,22 @@ struct ContentView: View {
             Button("好") { controller.message = nil }
         } message: {
             Text(controller.message ?? "")
+        }
+    }
+
+    /// 点按处显示对焦框：先放大出现、收缩到位，1.5 秒后淡出
+    private func showFocusBox(at point: CGPoint) {
+        focusBoxPoint = point
+        focusBoxScale = 1.3
+        withAnimation(.easeOut(duration: 0.2)) {
+            focusBoxVisible = true
+            focusBoxScale = 1.0
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            guard focusBoxPoint == point else { return }
+            withAnimation(.easeOut(duration: 0.3)) {
+                focusBoxVisible = false
+            }
         }
     }
 

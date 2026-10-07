@@ -2,7 +2,7 @@ import AVFoundation
 import CoreImage
 import UIKit
 
-/// 采集控制器：相机会话、对焦策略、镜头切换、动态间隔抽帧、越档减帧、中断处理。
+/// 采集控制器：相机会话、对焦策略、变焦档位切换、动态间隔抽帧、越档减帧、中断处理。
 ///
 /// 与原生相机的唯一差异：对焦用 continuousAutoFocus + 平滑对焦（原生延时是开始时锁定）。
 /// 抽帧间隔复刻原生延时摄影的动态表，成片恒为 20–40 秒 @30fps。
@@ -14,10 +14,12 @@ final class CaptureController: NSObject, ObservableObject {
         case composing
     }
 
-    /// 一颗可用镜头及其变焦倍率标签（".5" / "1" / "3" 等，仿原生显示）
+    /// 一个变焦档位（仿原生相机的 0.5 / 1 / 2 / 3）。
+    /// 物理镜头 zoomFactor 为 1；2x 这类虚拟档位复用主摄 + 传感器中心裁切（与原生一致）。
     struct LensInfo: Identifiable {
         let id = UUID()
         let device: AVCaptureDevice
+        let zoomFactor: CGFloat
         let label: String
     }
 
@@ -82,22 +84,38 @@ final class CaptureController: NSObject, ObservableObject {
         }
     }
 
-    /// 发现本机所有后置镜头（超广角/广角/长焦），按视野从宽到窄排序
-    private func discoverLenses() -> [LensInfo] {
+    /// 组装变焦档位列表（仿原生相机）：
+    /// 物理镜头（超广角/广角/长焦）按视野从宽到窄排序；
+    /// 若长焦 ≥3x，在主摄上补一个 2x 虚拟档位（48MP 中心裁切，如 iPhone 14 Pro 系列）。
+    private func discoverLensStops() -> [LensInfo] {
         let discovery = AVCaptureDevice.DiscoverySession(
             deviceTypes: [.builtInUltraWideCamera, .builtInWideAngleCamera, .builtInTelephotoCamera],
             mediaType: .video, position: .back)
         let devices = discovery.devices.sorted {
             $0.activeFormat.videoFieldOfView > $1.activeFormat.videoFieldOfView
         }
-        let wideFOV = devices.first(where: { $0.deviceType == .builtInWideAngleCamera })?
-            .activeFormat.videoFieldOfView ?? 73
-        return devices.map { device in
-            // 变焦倍率 ≈ 广角视野 / 本镜头视野，取整到 0.5 一档
+        let wideDevice = devices.first(where: { $0.deviceType == .builtInWideAngleCamera })
+        let wideFOV = wideDevice?.activeFormat.videoFieldOfView ?? 73
+
+        func factor(of device: AVCaptureDevice) -> Double {
             let raw = Double(wideFOV / device.activeFormat.videoFieldOfView)
-            let factor = (raw * 2).rounded() / 2
-            return LensInfo(device: device, label: Self.zoomLabel(factor))
+            return (raw * 2).rounded() / 2
         }
+
+        let teleFactor = devices.last(where: { $0.deviceType == .builtInTelephotoCamera }).map(factor) ?? 0
+
+        var stops: [LensInfo] = []
+        for device in devices {
+            // 在长焦档位前插入主摄 2x 虚拟档位（原生在 3x/5x 长焦机型上均提供 2x）
+            if device.deviceType == .builtInTelephotoCamera,
+               teleFactor >= 3,
+               let wide = wideDevice,
+               wide.maxAvailableVideoZoomFactor >= 2 {
+                stops.append(LensInfo(device: wide, zoomFactor: 2, label: "2"))
+            }
+            stops.append(LensInfo(device: device, zoomFactor: 1, label: Self.zoomLabel(factor(of: device))))
+        }
+        return stops
     }
 
     /// 0.5 → ".5"，1 → "1"，3 → "3"（仿原生相机的显示方式）
@@ -112,10 +130,10 @@ final class CaptureController: NSObject, ObservableObject {
 
     /// 必须在 sessionQueue 调用
     private func configureSession() {
-        let discovered = discoverLenses()
-        // 默认使用广角（1x）；找不到则退回系统默认相机
+        let discovered = discoverLensStops()
+        // 默认使用广角 1x；找不到则退回系统默认相机
         let defaultIndex = discovered.firstIndex(where: {
-            $0.device.deviceType == .builtInWideAngleCamera
+            $0.device.deviceType == .builtInWideAngleCamera && $0.zoomFactor == 1
         }) ?? 0
 
         session.beginConfiguration()
@@ -146,7 +164,7 @@ final class CaptureController: NSObject, ObservableObject {
         configureConnection()
         session.commitConfiguration()
 
-        applyCapturePolicy(to: device)
+        applyCapturePolicy(to: device, zoom: 1)
 
         DispatchQueue.main.async {
             self.lenses = discovered
@@ -165,11 +183,15 @@ final class CaptureController: NSObject, ObservableObject {
         }
     }
 
-    /// 对焦/曝光策略：本 App 存在的意义。
+    /// 变焦倍率 + 对焦/曝光策略（本 App 存在的意义）：
     /// 连续自动对焦 + 平滑过渡，对焦区域默认画面中心；曝光/白平衡连续自动，与原生一致。
-    private func applyCapturePolicy(to device: AVCaptureDevice) {
+    private func applyCapturePolicy(to device: AVCaptureDevice, zoom: CGFloat) {
         do {
             try device.lockForConfiguration()
+            let clampedZoom = max(1, min(zoom, device.maxAvailableVideoZoomFactor))
+            if device.videoZoomFactor != clampedZoom {
+                device.videoZoomFactor = clampedZoom
+            }
             if device.isFocusModeSupported(.continuousAutoFocus) {
                 device.focusMode = .continuousAutoFocus
             }
@@ -188,25 +210,33 @@ final class CaptureController: NSObject, ObservableObject {
         }
     }
 
-    /// 切换镜头（仅录制前可用；录制中锁定，避免分辨率/视野突变）
+    /// 切换变焦档位（仅录制前可用；录制中锁定，避免视野/分辨率突变）。
+    /// 同一颗镜头的档位切换（如 1x ↔ 2x）只改变焦倍率，不重建输入。
     func switchLens(to index: Int) {
         guard state == .idle, index != currentLensIndex, lenses.indices.contains(index) else { return }
         sessionQueue.async {
-            let device = self.lenses[index].device
-            self.session.beginConfiguration()
-            for input in self.session.inputs {
-                self.session.removeInput(input)
-            }
-            guard let input = try? AVCaptureDeviceInput(device: device),
-                  self.session.canAddInput(input) else {
+            let stop = self.lenses[index]
+            let current = self.lenses[self.currentLensIndex]
+
+            if stop.device.uniqueID == current.device.uniqueID {
+                // 同一颗镜头：只调 videoZoomFactor（中心裁切），会话不动
+                self.applyCapturePolicy(to: stop.device, zoom: stop.zoomFactor)
+            } else {
+                self.session.beginConfiguration()
+                for input in self.session.inputs {
+                    self.session.removeInput(input)
+                }
+                guard let input = try? AVCaptureDeviceInput(device: stop.device),
+                      self.session.canAddInput(input) else {
+                    self.session.commitConfiguration()
+                    DispatchQueue.main.async { self.message = "镜头切换失败" }
+                    return
+                }
+                self.session.addInput(input)
+                self.configureConnection()
                 self.session.commitConfiguration()
-                DispatchQueue.main.async { self.message = "镜头切换失败" }
-                return
+                self.applyCapturePolicy(to: stop.device, zoom: stop.zoomFactor)
             }
-            self.session.addInput(input)
-            self.configureConnection()
-            self.session.commitConfiguration()
-            self.applyCapturePolicy(to: device)
             DispatchQueue.main.async { self.currentLensIndex = index }
         }
     }
