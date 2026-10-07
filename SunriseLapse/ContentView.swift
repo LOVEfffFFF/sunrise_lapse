@@ -45,6 +45,31 @@ struct ContentView: View {
 
                 Spacer()
 
+                // 镜头切换（仿原生 .5 / 1 / 3；仅录制前可切）
+                if controller.lenses.count > 1 {
+                    HStack(spacing: 12) {
+                        ForEach(Array(controller.lenses.enumerated()), id: \.element.id) { index, lens in
+                            Button {
+                                controller.switchLens(to: index)
+                            } label: {
+                                Text(lens.label)
+                                    .font(.system(.caption, design: .rounded).bold())
+                                    .foregroundColor(index == controller.currentLensIndex ? .yellow : .white)
+                                    .frame(width: 36, height: 36)
+                                    .background(.black.opacity(index == controller.currentLensIndex ? 0.7 : 0.4))
+                                    .clipShape(Circle())
+                                    .overlay(
+                                        Circle().stroke(
+                                            index == controller.currentLensIndex ? Color.yellow : Color.clear,
+                                            lineWidth: 1.5)
+                                    )
+                            }
+                            .disabled(controller.state != .idle)
+                        }
+                    }
+                    .padding(.bottom, 16)
+                }
+
                 recordButton
                     .padding(.bottom, 32)
             }

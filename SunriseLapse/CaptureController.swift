@@ -2,7 +2,7 @@ import AVFoundation
 import CoreImage
 import UIKit
 
-/// 采集控制器：相机会话、对焦策略、动态间隔抽帧、越档减帧、中断处理。
+/// 采集控制器：相机会话、对焦策略、镜头切换、动态间隔抽帧、越档减帧、中断处理。
 ///
 /// 与原生相机的唯一差异：对焦用 continuousAutoFocus + 平滑对焦（原生延时是开始时锁定）。
 /// 抽帧间隔复刻原生延时摄影的动态表，成片恒为 20–40 秒 @30fps。
@@ -14,8 +14,17 @@ final class CaptureController: NSObject, ObservableObject {
         case composing
     }
 
+    /// 一颗可用镜头及其变焦倍率标签（".5" / "1" / "3" 等，仿原生显示）
+    struct LensInfo: Identifiable {
+        let id = UUID()
+        let device: AVCaptureDevice
+        let label: String
+    }
+
     @Published private(set) var state: State = .idle
     @Published private(set) var elapsed: TimeInterval = 0
+    @Published private(set) var lenses: [LensInfo] = []
+    @Published private(set) var currentLensIndex = 0
     @Published var message: String?
 
     let session = AVCaptureSession()
@@ -73,13 +82,57 @@ final class CaptureController: NSObject, ObservableObject {
         }
     }
 
+    /// 发现本机所有后置镜头（超广角/广角/长焦），按视野从宽到窄排序
+    private func discoverLenses() -> [LensInfo] {
+        let discovery = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInUltraWideCamera, .builtInWideAngleCamera, .builtInTelephotoCamera],
+            mediaType: .video, position: .back)
+        let devices = discovery.devices.sorted {
+            $0.activeFormat.videoFieldOfView > $1.activeFormat.videoFieldOfView
+        }
+        let wideFOV = devices.first(where: { $0.deviceType == .builtInWideAngleCamera })?
+            .activeFormat.videoFieldOfView ?? 73
+        return devices.map { device in
+            // 变焦倍率 ≈ 广角视野 / 本镜头视野，取整到 0.5 一档
+            let raw = Double(wideFOV / device.activeFormat.videoFieldOfView)
+            let factor = (raw * 2).rounded() / 2
+            return LensInfo(device: device, label: Self.zoomLabel(factor))
+        }
+    }
+
+    /// 0.5 → ".5"，1 → "1"，3 → "3"（仿原生相机的显示方式）
+    private static func zoomLabel(_ factor: Double) -> String {
+        if factor < 1 {
+            let s = String(format: "%.1f", factor)
+            return s.hasPrefix("0") ? String(s.dropFirst()) : s
+        }
+        return factor.truncatingRemainder(dividingBy: 1) == 0
+            ? String(Int(factor)) : String(format: "%.1f", factor)
+    }
+
     /// 必须在 sessionQueue 调用
     private func configureSession() {
+        let discovered = discoverLenses()
+        // 默认使用广角（1x）；找不到则退回系统默认相机
+        let defaultIndex = discovered.firstIndex(where: {
+            $0.device.deviceType == .builtInWideAngleCamera
+        }) ?? 0
+
         session.beginConfiguration()
         session.sessionPreset = .hd1920x1080
 
-        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-              let input = try? AVCaptureDeviceInput(device: device),
+        let device: AVCaptureDevice
+        if discovered.indices.contains(defaultIndex) {
+            device = discovered[defaultIndex].device
+        } else if let fallback = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
+            device = fallback
+        } else {
+            session.commitConfiguration()
+            DispatchQueue.main.async { self.message = "无法初始化相机" }
+            return
+        }
+
+        guard let input = try? AVCaptureDeviceInput(device: device),
               session.canAddInput(input), session.canAddOutput(videoOutput) else {
             session.commitConfiguration()
             DispatchQueue.main.async { self.message = "无法初始化相机" }
@@ -90,19 +143,31 @@ final class CaptureController: NSObject, ObservableObject {
         videoOutput.alwaysDiscardsLateVideoFrames = true
         videoOutput.setSampleBufferDelegate(self, queue: captureQueue)
         session.addOutput(videoOutput)
-
-        if let connection = videoOutput.connection(with: .video) {
-            if connection.isVideoRotationAngleSupported(90) {
-                connection.videoRotationAngle = 90 // 竖屏
-            }
-            if connection.isVideoStabilizationSupported {
-                connection.preferredVideoStabilizationMode = .auto // 与原生一致，交给系统
-            }
-        }
+        configureConnection()
         session.commitConfiguration()
 
-        // 对焦：本 App 存在的意义。连续自动对焦 + 平滑过渡，对焦区域默认画面中心。
-        // 曝光/白平衡保持连续自动，与原生拍照一致。
+        applyCapturePolicy(to: device)
+
+        DispatchQueue.main.async {
+            self.lenses = discovered
+            self.currentLensIndex = defaultIndex
+        }
+    }
+
+    /// 预览/采集连接的公共设置；切换镜头后需重设
+    private func configureConnection() {
+        guard let connection = videoOutput.connection(with: .video) else { return }
+        if connection.isVideoRotationAngleSupported(90) {
+            connection.videoRotationAngle = 90 // 竖屏
+        }
+        if connection.isVideoStabilizationSupported {
+            connection.preferredVideoStabilizationMode = .auto // 与原生一致，交给系统
+        }
+    }
+
+    /// 对焦/曝光策略：本 App 存在的意义。
+    /// 连续自动对焦 + 平滑过渡，对焦区域默认画面中心；曝光/白平衡连续自动，与原生一致。
+    private func applyCapturePolicy(to device: AVCaptureDevice) {
         do {
             try device.lockForConfiguration()
             if device.isFocusModeSupported(.continuousAutoFocus) {
@@ -120,6 +185,29 @@ final class CaptureController: NSObject, ObservableObject {
             device.unlockForConfiguration()
         } catch {
             // 配置失败不致命，系统会回退到默认模式
+        }
+    }
+
+    /// 切换镜头（仅录制前可用；录制中锁定，避免分辨率/视野突变）
+    func switchLens(to index: Int) {
+        guard state == .idle, index != currentLensIndex, lenses.indices.contains(index) else { return }
+        sessionQueue.async {
+            let device = self.lenses[index].device
+            self.session.beginConfiguration()
+            for input in self.session.inputs {
+                self.session.removeInput(input)
+            }
+            guard let input = try? AVCaptureDeviceInput(device: device),
+                  self.session.canAddInput(input) else {
+                self.session.commitConfiguration()
+                DispatchQueue.main.async { self.message = "镜头切换失败" }
+                return
+            }
+            self.session.addInput(input)
+            self.configureConnection()
+            self.session.commitConfiguration()
+            self.applyCapturePolicy(to: device)
+            DispatchQueue.main.async { self.currentLensIndex = index }
         }
     }
 
@@ -188,7 +276,7 @@ final class CaptureController: NSObject, ObservableObject {
         }
     }
 
-    /// 结束录制并合成。interrupted=true 时表示被系统打断（来电/锁屏等）
+    /// 结束录制并合成
     private func finishRecording(saveResult: Bool) {
         elapsedTimer?.invalidate()
         elapsedTimer = nil
