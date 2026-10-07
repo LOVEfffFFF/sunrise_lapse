@@ -36,7 +36,7 @@ final class TimelapseComposer {
 
             let sourceAttrs: [String: Any] = [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB,
-                kCVVideoPixelBufferWidthKey as String: width,
+                kCVPixelBufferWidthKey as String: width,
                 kCVPixelBufferHeightKey as String: height
             ]
             let adaptor = AVAssetWriterInputPixelBufferAdaptor(
