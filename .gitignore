@@ -1,0 +1,12 @@
+# XcodeGen 生成的工程文件，不进仓库
+*.xcodeproj/
+xcuserdata/
+
+# 构建产物
+build/
+DerivedData/
+*.ipa
+Payload/
+
+# macOS
+.DS_Store

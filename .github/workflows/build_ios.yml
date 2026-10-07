@@ -1,0 +1,81 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: '构建类型'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
+
+jobs:
+  build:
+    name: Build iOS App
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Determine configuration
+        run: |
+          if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
+            echo "CONFIG=Release" >> "$GITHUB_ENV"
+          else
+            echo "CONFIG=Debug" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build iOS App
+        run: |
+          xcodebuild -project SunriseLapse.xcodeproj \
+            -scheme SunriseLapse \
+            -configuration "$CONFIG" \
+            -sdk iphoneos \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            build
+
+      - name: Create Payload and IPA
+        run: |
+          APP="build/DerivedData/Build/Products/$CONFIG-iphoneos/SunriseLapse.app"
+          ls -la "$APP"
+          mkdir -p Payload
+          cp -r "$APP" Payload/
+          zip -r SunriseLapse.ipa Payload/
+          rm -rf Payload
+          echo "IPA size: $(du -sh SunriseLapse.ipa | cut -f1)"
+
+      - name: Upload IPA artifact
+        if: github.event.inputs.build_type == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SunriseLapse-${{ github.sha }}
+          path: SunriseLapse.ipa
+          retention-days: 1
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.sha }}
+          path: build/
+          retention-days: 1
