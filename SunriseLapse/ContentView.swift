@@ -11,10 +11,18 @@ struct ContentView: View {
             ZStack {
                 Color.black.ignoresSafeArea()
 
-                CameraPreview(session: controller.session) { layerPoint, devicePoint in
-                    controller.focus(at: devicePoint)
-                    showFocusBox(at: layerPoint)
-                }
+                CameraPreview(
+                    session: controller.session,
+                    onTap: { layerPoint, devicePoint in
+                        controller.focus(at: devicePoint)
+                        showFocusBox(at: layerPoint)
+                    },
+                    onLongPress: { layerPoint, devicePoint in
+                        controller.lockFocus(at: devicePoint)
+                        showFocusBox(at: layerPoint)
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    }
+                )
                 .ignoresSafeArea()
 
                 // 水平仪：白色基准线 + 实时水平线（与真实地平面平行，水平时变黄重合）
@@ -30,14 +38,23 @@ struct ContentView: View {
                 .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
                 .allowsHitTesting(false)
 
-                // 对焦框（仿原生拍照模式：点按后出现并一直停留在该点）
+                // 对焦框（常驻）。未锁定：连续自动对焦，框只是指示当前对焦区域；
+                // 锁定后：边框加粗 + 下方出现锁图标（仿原生 AE/AF 锁定）
                 if let point = focusBoxPoint {
-                    Rectangle()
-                        .stroke(Color.yellow, lineWidth: 1.5)
-                        .frame(width: 80, height: 80)
-                        .scaleEffect(focusBoxScale)
-                        .position(point)
-                        .allowsHitTesting(false)
+                    ZStack {
+                        Rectangle()
+                            .stroke(Color.yellow, lineWidth: controller.isFocusLocked ? 2.5 : 1.5)
+                            .frame(width: 80, height: 80)
+                        if controller.isFocusLocked {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 12))
+                                .foregroundColor(.yellow)
+                                .offset(y: 52)
+                        }
+                    }
+                    .scaleEffect(focusBoxScale)
+                    .position(point)
+                    .allowsHitTesting(false)
                 }
 
                 VStack {

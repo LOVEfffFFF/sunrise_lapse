@@ -27,7 +27,10 @@ final class CaptureController: NSObject, ObservableObject {
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var lenses: [LensInfo] = []
     @Published private(set) var currentLensIndex = 0
+    @Published private(set) var isFocusLocked = false
     @Published var message: String?
+
+    private var focusObservation: NSKeyValueObservation?
 
     let session = AVCaptureSession()
 
@@ -237,14 +240,21 @@ final class CaptureController: NSObject, ObservableObject {
                 self.session.commitConfiguration()
                 self.applyCapturePolicy(to: stop.device, zoom: stop.zoomFactor)
             }
-            DispatchQueue.main.async { self.currentLensIndex = index }
+            DispatchQueue.main.async {
+                self.currentLensIndex = index
+                self.isFocusLocked = false // 切换档位后回到连续自动对焦
+            }
         }
     }
 
-    /// 点按对焦/曝光（原生手势）。保持连续模式，仅移动兴趣点。
+    /// 点按：移动对焦/曝光兴趣点。连续自动对焦保持不变（焦点距离仍随场景自动调整，
+    /// 太阳移动、光线变化都会持续重新合焦）。若此前处于锁定态，点按即解锁并回到连续自动
+    ///（仿原生相机：锁定后点别处自动解锁）。
     func focus(at devicePoint: CGPoint) {
         sessionQueue.async {
             guard let device = (self.session.inputs.first as? AVCaptureDeviceInput)?.device else { return }
+            self.focusObservation?.invalidate()
+            self.focusObservation = nil
             do {
                 try device.lockForConfiguration()
                 if device.isFocusPointOfInterestSupported {
@@ -253,8 +263,76 @@ final class CaptureController: NSObject, ObservableObject {
                 if device.isExposurePointOfInterestSupported {
                     device.exposurePointOfInterest = devicePoint
                 }
+                if device.focusMode == .locked {
+                    if device.isFocusModeSupported(.continuousAutoFocus) {
+                        device.focusMode = .continuousAutoFocus
+                    }
+                    if device.isSmoothAutoFocusSupported {
+                        device.isSmoothAutoFocusEnabled = true
+                    }
+                }
+                if device.exposureMode == .locked,
+                   device.isExposureModeSupported(.continuousAutoExposure) {
+                    device.exposureMode = .continuousAutoExposure
+                }
                 device.unlockForConfiguration()
+                DispatchQueue.main.async { self.isFocusLocked = false }
             } catch {}
+        }
+    }
+
+    /// 长按：锁定对焦/曝光在该点（仿原生相机的 AE/AF 锁定）。
+    /// 先在该点做一次单次对焦，合焦完成后才锁定镜头位置；3 秒未合焦也强制锁定兜底。
+    /// 只有锁定后对焦才真正固定，未锁定时永远连续自动。
+    func lockFocus(at devicePoint: CGPoint) {
+        sessionQueue.async {
+            guard let device = (self.session.inputs.first as? AVCaptureDeviceInput)?.device else { return }
+            self.focusObservation?.invalidate()
+            self.focusObservation = nil
+            do {
+                try device.lockForConfiguration()
+                if device.isFocusPointOfInterestSupported {
+                    device.focusPointOfInterest = devicePoint
+                }
+                if device.isExposurePointOfInterestSupported {
+                    device.exposurePointOfInterest = devicePoint
+                }
+                if device.isFocusModeSupported(.autoFocus) {
+                    device.focusMode = .autoFocus // 单次对焦，合焦后由 KVO 转锁定
+                }
+                device.unlockForConfiguration()
+            } catch {
+                return
+            }
+
+            let lockNow: (AVCaptureDevice) -> Void = { dev in
+                do {
+                    try dev.lockForConfiguration()
+                    if dev.isFocusModeSupported(.locked) {
+                        dev.focusMode = .locked
+                    }
+                    if dev.isExposureModeSupported(.locked) {
+                        dev.exposureMode = .locked
+                    }
+                    dev.unlockForConfiguration()
+                    DispatchQueue.main.async { self.isFocusLocked = true }
+                } catch {}
+            }
+
+            // 等合焦完成后锁定（KVO）
+            self.focusObservation = device.observe(\.isAdjustingFocus, options: [.new]) { [weak self] dev, change in
+                guard let self, change.newValue == false else { return }
+                self.focusObservation?.invalidate()
+                self.focusObservation = nil
+                lockNow(dev)
+            }
+            // 暗光下可能迟迟不合焦：3 秒强制锁定兜底
+            self.sessionQueue.asyncAfter(deadline: .now() + 3) {
+                guard self.focusObservation != nil else { return }
+                self.focusObservation?.invalidate()
+                self.focusObservation = nil
+                lockNow(device)
+            }
         }
     }
 
