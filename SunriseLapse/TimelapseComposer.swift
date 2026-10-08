@@ -73,11 +73,7 @@ final class TimelapseComposer {
                             var pixelBuffer: CVPixelBuffer?
                             CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pixelBuffer)
                             if let pixelBuffer {
-                                // CIContext 渲染进 CVPixelBuffer 时以左下角为原点，
-                                // 而编码器按左上角为原点读取——不预翻转成片就是倒立的
-                                let flip = CGAffineTransform(a: 1, b: 0, c: 0, d: -1,
-                                                             tx: 0, ty: CGFloat(height))
-                                ciContext.render(image.transformed(by: flip), to: pixelBuffer)
+                                ciContext.render(image, to: pixelBuffer)
                                 adaptor.append(pixelBuffer, withPresentationTime: pts)
                             }
                         }

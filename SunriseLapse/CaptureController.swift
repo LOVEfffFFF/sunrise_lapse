@@ -463,8 +463,9 @@ extension CaptureController: AVCaptureVideoDataOutputSampleBufferDelegate {
         lastFrameTimestamp = now
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        // 竖屏：传感器横向输出旋转 90°，烘焙进 JPEG（1080x1920）
-        let image = CIImage(cvPixelBuffer: pixelBuffer).oriented(.right)
+        // 竖屏：传感器横向缓冲需逆时针旋转 90° 才是正立竖屏（1080x1920）。
+        // 注意是 .left：用 .right 会转出倒立 180° 的帧
+        let image = CIImage(cvPixelBuffer: pixelBuffer).oriented(.left)
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
               let jpeg = ciContext.jpegRepresentation(of: image, colorSpace: colorSpace) else { return }
         store.saveFrame(jpeg: jpeg)
